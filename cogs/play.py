@@ -396,95 +396,159 @@ class MusicCog(commands.Cog):
             except Exception as e:
                 logger.error(f"Error looping track: {e}")
 
-    # =========================================================
+        # =========================================================
     # SLASH COMMAND: /play
     # =========================================================
-    @app_commands.command(name="play", description="Search for and play a song with an advanced UI.")
-    @app_commands.describe(song="The name or URL of the song you want to play.")
+    @app_commands.command(
+        name="play", 
+        description="Search for and stream high-quality audio with an interactive media controller."
+    )
+    @app_commands.describe(
+        song="Enter the title, artist name, or full URL (YouTube/SoundCloud) to play."
+    )
     async def play_command(self, interaction: discord.Interaction, song: str):
-        # 1. Voice State Verification
+        # 1. Voice Connection Validation
         if not interaction.user.voice or not interaction.user.voice.channel:
-            return await interaction.response.send_message(
-                "❌ You need to be in a voice channel to use this command.", 
-                ephemeral=True
+            embed_err = discord.Embed(
+                title="⚠️ Voice Channel Required",
+                description="You must be connected to a voice channel before executing this command.",
+                color=discord.Color.brand_red()
             )
-            
+            return await interaction.response.send_message(embed=embed_err, ephemeral=True)
+
         voice_channel = interaction.user.voice.channel
         state = self.get_state(interaction.guild_id)
-        
-        # Defer response since processing takes time
+
+        # Defer interaction to acknowledge command execution instantly
         await interaction.response.defer(ephemeral=False)
-        
-        # Join channel if not already connected
+
+        # Connect or migrate the voice client if needed
         vc = interaction.guild.voice_client
-        if not vc:
-            vc = await voice_channel.connect()
-            state.set_client(vc)
-        elif vc.channel != voice_channel:
-            await vc.move_to(voice_channel)
-            state.set_client(vc)
-            
-        # 2. Simulate 10-second Search with dynamic message editing
-        # To avoid rate limits, we'll edit at specific intervals rather than every single second
-        status_msg = await interaction.followup.send("🔍 **Searching...** Analyzing best audio streams. Please wait 10 seconds.")
-        
+        try:
+            if not vc:
+                vc = await voice_channel.connect(timeout=15.0, reconnect=True)
+                state.set_client(vc)
+            elif vc.channel.id != voice_channel.id:
+                await vc.move_to(voice_channel)
+                state.set_client(vc)
+        except Exception as vc_err:
+            logger.error(f"Failed to connect to voice channel: {vc_err}")
+            embed_vc_err = discord.Embed(
+                title="❌ Voice Connection Failed",
+                description="Could not establish a connection to your voice channel. Check bot permissions.",
+                color=discord.Color.red()
+            )
+            return await interaction.edit_original_response(embed=embed_vc_err)
+
+        # 2. Simulated Search Countdown & Progress Tracker
+        await interaction.edit_original_response(
+            content="📡 **[1/3] Searching Data Sources...** Fetching top audio stream candidates. *(10s remaining)*"
+        )
         await asyncio.sleep(3)
-        await status_msg.edit(content="⏳ **Searching...** Filtering high-quality results. 7 seconds remaining.")
-        
+
+        await interaction.edit_original_response(
+            content="⚙️ **[2/3] Extracting Stream Metadata...** Validating audio codecs and bitrates. *(7s remaining)*"
+        )
         await asyncio.sleep(4)
-        await status_msg.edit(content="⚙️ **Processing...** Extracting audio metadata. 3 seconds remaining.")
-        
+
+        await interaction.edit_original_response(
+            content="🎨 **[3/3] Generating Visual Assets...** Rendering Pillow interface card. *(3s remaining)*"
+        )
         await asyncio.sleep(3)
-        
-        # Stop current audio if playing
+
+        # Stop currently active stream before starting a new track
         if vc.is_playing() or vc.is_paused():
             vc.stop()
 
-        # 3. Extract Audio via yt-dlp
+        # 3. Fetch Audio Source Stream via YTDL
         try:
             source = await YTDLSource.create_source(song, self.bot.loop)
             source.volume = state.volume
-        except Exception as e:
-            return await status_msg.edit(content=f"❌ **An error occurred while searching:** `{e}`")
+        except Exception as extract_err:
+            logger.error(f"YTDL Extraction error: {extract_err}")
+            embed_ytdl_err = discord.Embed(
+                title="❌ Stream Extraction Failed",
+                description=f"Unable to process the requested query:\n```py\n{str(extract_err)[:1000]}\n```",
+                color=discord.Color.dark_red()
+            )
+            return await interaction.edit_original_response(content=None, embed=embed_ytdl_err)
 
-        # Update State
+        # Update Guild State records
         state.last_played_search = song
         state.current_song_data = source.data
 
-        # 4. Generate the Advanced PIL Image Card
-        await status_msg.edit(content="🎨 **Rendering UI...** Generating rich media card.")
+        # 4. Generate Dynamic Canvas Image via AudioCardGenerator
+        file_attachment = None
         try:
             image_buffer = await AudioCardGenerator.generate_card(
                 thumbnail_url=source.thumbnail,
                 title=source.title,
                 duration=source.formatted_duration
             )
-            file = discord.File(fp=image_buffer, filename="music_card.png")
-        except Exception as e:
-            logger.error(f"Failed to generate PIL image: {e}")
-            file = None
+            file_attachment = discord.File(fp=image_buffer, filename="music_card.png")
+        except Exception as pil_err:
+            logger.error(f"PIL Image generation exception: {pil_err}")
 
-        # 5. Construct the Rich Embed
+        # 5. Build Advanced Rich Embed
+        uploader_name = source.data.get('uploader', 'Unknown Artist')
+        webpage_url = source.data.get('webpage_url', 'https://youtube.com')
+
         embed = discord.Embed(
-            description=f"** {source.title} **\nDuration: **{source.formatted_duration}**",
-            color=0x5865F2 # Blurple
+            title="🎶 Now Playing",
+            description=f"**[{source.title}]({webpage_url})**",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow()
         )
-        if file:
-            embed.set_image(url="attachment://music_card.png")
-            
-        embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
 
-        # 6. Create UI View
+        # Add structured fields for a comprehensive UI layout
+        embed.add_field(name="⏱️ Duration", value=f"`{source.formatted_duration}`", inline=True)
+        embed.add_field(name="👤 Channel / Artist", value=f"`{uploader_name}`", inline=True)
+        embed.add_field(name="🔊 Master Volume", value=f"`{int(state.volume * 100)}%`", inline=True)
+        
+        loop_status = " Enabled" if state.is_looping else " Disabled"
+        embed.add_field(name="🔁 Loop Mode", value=f"`{loop_status}`", inline=True)
+        embed.add_field(name="📍 Voice Channel", value=f"{voice_channel.mention}", inline=True)
+        embed.add_field(name="⚡ Engine", value="`FFmpeg + PyNaCl`", inline=True)
+
+        if file_attachment:
+            embed.set_image(url="attachment://music_card.png")
+
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(
+            text=f"Requested by {interaction.user.name} • High-Fidelity Audio",
+            icon_url=self.bot.user.display_avatar.url
+        )
+
+        # 6. Instantiate Media Controller View Components
         view = MediaControllerView(state, self)
 
-        # 7. Start Playback and Send Final Embed
-        vc.play(source, after=lambda e: self.play_next(interaction.guild_id, e))
-        
-        if file:
-            await status_msg.edit(content=None, embed=embed, view=view, attachments=[file])
-        else:
-            await status_msg.edit(content=None, embed=embed, view=view)
+        # 7. Initiate Audio Playback Flow
+        try:
+            vc.play(source, after=lambda err: self.play_next(interaction.guild_id, err))
+        except Exception as play_err:
+            logger.error(f"Playback initiation error: {play_err}")
+            embed_play_err = discord.Embed(
+                title="❌ Playback Engine Error",
+                description=f"Failed to transmit stream to voice gateway:\n`{play_err}`",
+                color=discord.Color.red()
+            )
+            return await interaction.edit_original_response(content=None, embed=embed_play_err)
 
+        # 8. Dispatch Final Message Payload
+        if file_attachment:
+            await interaction.edit_original_response(
+                content=None, 
+                embed=embed, 
+                view=view, 
+                attachments=[file_attachment]
+            )
+        else:
+            await interaction.edit_original_response(
+                content=None, 
+                embed=embed, 
+                view=view
+            )
+            
 
     # =========================================================
     # INDIVIDUAL CONTROL SLASH COMMANDS
