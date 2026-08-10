@@ -73,7 +73,7 @@ class AdvancedMusicBot(commands.Bot):
 # ---------------------------------------------------------
 # 4. BACKGROUND TASKS & EVENTS
 # ---------------------------------------------------------
-    @tasks.loop(minutes=3)
+    @tasks.loop(seconds=6)
     async def change_status(self):
         """Cycles the bot's rich presence every 3 minutes."""
         new_presence = next(self.presence_cycle)
